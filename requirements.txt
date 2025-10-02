@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+requests
+python-dotenv
+langchain
+langchain-cerebras
+langchain-community
+langchain-ollama
+aiohttp
+json-repair
+httpx
+chromadb>=0.4.22
+sentence-transformers>=2.2.2

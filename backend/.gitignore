@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment
+.env
+venv/
+ENV/
+
+# Database
+db/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# RAG Vector Store (embeddings cache)
+chroma_db/

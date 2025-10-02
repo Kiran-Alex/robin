@@ -34,3 +34,31 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# environment variables
+.env
+.env.local
+
+# logs
+*.log
+
+# ide/editor
+.vscode/
+.claude/
+
+# temp/workspace
+workspace/
+
+# temp documentation (keep HACKATHON.md and README.md)
+FINAL_IMPLEMENTATION.md
+IMPLEMENTATION_SUMMARY.md
+QUICK_DEMO.md
+SUBMISSION_CHECKLIST.md
+HACKATHON.md
