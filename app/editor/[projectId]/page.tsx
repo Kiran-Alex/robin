@@ -5,13 +5,13 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import { Bot, RefreshCw, Rocket, ExternalLink, FileText, Folder, File, ChevronRight, ChevronDown, Send, Play, Square, Terminal, AlertCircle } from "lucide-react"
+import { Bot, RefreshCw, Rocket, ExternalLink, FileText, Folder, File, ChevronRight, ChevronDown, Send, Play, Square, Terminal, AlertCircle, Train } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { Textarea } from "@/components/ui/textarea"
 import Editor from "@monaco-editor/react"
 import { triggerConfetti } from "@/components/magicui/confetti"
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000"
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001"
 
 interface FileNode {
   name: string
@@ -48,6 +48,8 @@ export default function EditorPage({ params }: { params: { projectId: string } }
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(["src", "src/commands", "src/events"]))
   const [isDeploying, setIsDeploying] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [railwayUrl, setRailwayUrl] = useState<string | null>(null)
+  const [deploymentStatus, setDeploymentStatus] = useState<"idle" | "deploying" | "success" | "error">("idle")
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -77,30 +79,46 @@ export default function EditorPage({ params }: { params: { projectId: string } }
 
   useEffect(() => {
     const loadTree = async () => {
+      const startTime = performance.now()
       try {
         const res = await fetch(`${BACKEND_URL}/projects/${params.projectId}/tree`)
         if (!res.ok) throw new Error("Failed to fetch project tree")
         const data = await res.json()
         setTree(data.tree || [])
+
+        const elapsed = performance.now() - startTime
+        console.log(`Tree loaded in ${elapsed.toFixed(0)}ms`)
+
+        // Auto-load main bot file after tree loads
+        const mainFiles = ["main.py", "bot.py", "src/bot.py", "src/main.py"]
+        for (const fileName of mainFiles) {
+          const fileNode = findFileInTree(data.tree || [], fileName)
+          if (fileNode) {
+            console.log(`Auto-loading ${fileName}...`)
+            await loadFileContent(fileNode.path)
+            setSelectedFilePath(fileNode.path)
+            break
+          }
+        }
+
+        // Try to extract application ID and autoStart flag from URL params or localStorage
+        const urlParams = new URLSearchParams(window.location.search)
+        const appId = urlParams.get('applicationId') || localStorage.getItem(`bot_${params.projectId}_appId`) || ""
+        const shouldAutoStart = urlParams.get('autoStart') === 'true'
+        setApplicationId(appId)
+
+        // Auto-start bot ONLY after tree and files are loaded
+        if (shouldAutoStart) {
+          console.log("Auto-start flag detected, starting bot after files loaded...")
+          setTimeout(() => {
+            handleStartBot()
+          }, 1000)  // Short delay after files are loaded
+        }
       } catch (e) {
         console.error(e)
       }
     }
     loadTree()
-
-    // Try to extract application ID and autoStart flag from URL params or localStorage
-    const urlParams = new URLSearchParams(window.location.search)
-    const appId = urlParams.get('applicationId') || localStorage.getItem(`bot_${params.projectId}_appId`) || ""
-    const shouldAutoStart = urlParams.get('autoStart') === 'true'
-    setApplicationId(appId)
-
-    // Auto-start bot if flag is set
-    if (shouldAutoStart) {
-      console.log("Auto-start flag detected, starting bot...")
-      setTimeout(() => {
-        handleStartBot()
-      }, 2000)  // Wait 2s for page to fully load
-    }
 
     // Check bot and Docker status
     const checkStatus = async () => {
@@ -138,6 +156,30 @@ export default function EditorPage({ params }: { params: { projectId: string } }
       }).catch(err => console.warn("Failed to stop container on cleanup:", err))
     }
   }, [params.projectId])  // Only depend on projectId, not botRunning
+
+  const findFileInTree = (nodes: BackendNode[], targetName: string): BackendNode | null => {
+    for (const node of nodes) {
+      if (node.type === "file" && (node.name === targetName || node.path === targetName)) {
+        return node
+      }
+      if (node.type === "dir" && node.children) {
+        const found = findFileInTree(node.children, targetName)
+        if (found) return found
+      }
+    }
+    return null
+  }
+
+  const loadFileContent = async (path: string) => {
+    try {
+      const content = await readFileFromBackend(path)
+      setContentsByPath((prev) => ({ ...prev, [path]: content }))
+      return content
+    } catch (e) {
+      console.error(`Failed to load ${path}:`, e)
+      return null
+    }
+  }
 
   const readFileFromBackend = async (path: string) => {
     const res = await fetch(`${BACKEND_URL}/projects/${params.projectId}/file?path=${encodeURIComponent(path)}`)
@@ -345,6 +387,66 @@ export default function EditorPage({ params }: { params: { projectId: string } }
     }
   }
 
+  const handleDeployToRailway = async () => {
+    try {
+      // Step 1: Download the project ZIP
+      const downloadUrl = `${BACKEND_URL}/export-project-zip`
+      const downloadRes = await fetch(downloadUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: params.projectId })
+      })
+
+      if (!downloadRes.ok) {
+        throw new Error("Failed to prepare project for download")
+      }
+
+      // Trigger ZIP download
+      const blob = await downloadRes.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `discord-bot-${params.projectId}.zip`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+
+      // Step 2: Get Railway deployment info
+      const infoRes = await fetch(`${BACKEND_URL}/railway-deploy-url/${params.projectId}`)
+      if (!infoRes.ok) {
+        throw new Error("Failed to get Railway info")
+      }
+
+      const info = await infoRes.json()
+
+      // Step 3: Show instructions in chat
+      const instructionsMsg: ChatMessage = {
+        id: `${Date.now()}-railway-instructions`,
+        role: "ai",
+        content: `📦 Project downloaded! Now let's deploy to Railway:\n\n${info.instructions.join('\n')}\n\n⚠️ Important: When Railway asks for environment variables, add:\nDISCORD_TOKEN = ${info.discord_token}\n\nClick "Open Railway" below to start deployment.`
+      }
+      setMessages((prev) => [...prev, instructionsMsg])
+
+      // Step 4: Open Railway in new tab
+      setRailwayUrl(info.railway_url)
+      window.open(info.railway_url, '_blank')
+
+      setDeploymentStatus("success")
+
+    } catch (e: any) {
+      console.error(e)
+      setDeploymentStatus("error")
+
+      const errorMsg: ChatMessage = {
+        id: `${Date.now()}-railway-error`,
+        role: "ai",
+        content: `❌ Failed to prepare Railway deployment: ${e.message}`
+      }
+      setMessages((prev) => [...prev, errorMsg])
+    }
+  }
+
   // Auto-refresh logs when bot is running and Docker is ok
   useEffect(() => {
     if (!botRunning || dockerStatus !== "running") return
@@ -399,7 +501,7 @@ export default function EditorPage({ params }: { params: { projectId: string } }
       setMessages((prev) => [...prev, aiMsg])
 
       // If changes were made, refresh the tree
-      if (data.needs_changes) {
+      if (data.changes_applied) {
         await handleRefresh()
 
         // Show summary if available
@@ -411,34 +513,31 @@ export default function EditorPage({ params }: { params: { projectId: string } }
           }
           setMessages((prev) => [...prev, summaryMsg])
         }
-      }
 
-      // If restart is needed, restart the bot
-      if (data.needs_restart && botRunning) {
-        const restartMsg: ChatMessage = {
-          id: `${Date.now()}-restart`,
-          role: "ai",
-          content: "🔄 Restarting bot to apply changes..."
+        // Show specific changes made
+        if (data.changes && data.changes.length > 0) {
+          const changesMsg: ChatMessage = {
+            id: `${Date.now()}-changes`,
+            role: "ai",
+            content: `🔧 Changes applied:\n${data.changes.map((c: string) => `• ${c}`).join('\n')}`
+          }
+          setMessages((prev) => [...prev, changesMsg])
         }
-        setMessages((prev) => [...prev, restartMsg])
 
-        await handleStopBot()
-        await new Promise(resolve => setTimeout(resolve, 2000))
-        await handleStartBot()
+        // If auto-restarted, show restart status
+        if (data.auto_restarted) {
+          const restartMsg: ChatMessage = {
+            id: `${Date.now()}-restart`,
+            role: "ai",
+            content: "✅ Bot automatically restarted with new changes!"
+          }
+          setMessages((prev) => [...prev, restartMsg])
 
-        const doneMsg: ChatMessage = {
-          id: `${Date.now()}-done`,
-          role: "ai",
-          content: "✅ Bot restarted successfully!"
+          // Refresh bot status and logs
+          setBotRunning(true)
+          await new Promise(resolve => setTimeout(resolve, 1500))
+          await fetchLogs()
         }
-        setMessages((prev) => [...prev, doneMsg])
-      } else if (data.needs_restart && !botRunning) {
-        const startMsg: ChatMessage = {
-          id: `${Date.now()}-start`,
-          role: "ai",
-          content: "💡 Tip: Start the bot to see the changes in action!"
-        }
-        setMessages((prev) => [...prev, startMsg])
       }
     } catch (e) {
       console.error(e)
@@ -503,9 +602,13 @@ export default function EditorPage({ params }: { params: { projectId: string } }
                   {isStopping ? "Stopping..." : "Stop Bot"}
                 </Button>
               )}
-              <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
-                <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
-                Refresh
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDeployToRailway}
+              >
+                <Train className="h-4 w-4 mr-2" />
+                Deploy
               </Button>
             </div>
           </div>
@@ -525,6 +628,16 @@ export default function EditorPage({ params }: { params: { projectId: string } }
               <ExternalLink className="h-4 w-4 mr-2" />
               Invite Link
             </Button>
+            {railwayUrl && deploymentStatus === "success" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(railwayUrl, '_blank')}
+              >
+                <Rocket className="h-4 w-4 mr-2" />
+                Open Railway
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={() => setShowLogs(!showLogs)}>
               <Terminal className="h-4 w-4 mr-2" />
               {showLogs ? "Hide Logs" : "Show Logs"}

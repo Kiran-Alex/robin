@@ -114,8 +114,8 @@ Code Implementation:
                 'category': template.get('category', 'unknown'),
                 'name': template.get('name', 'unknown'),
                 'description': template.get('description', ''),
-                'tags': template.get('tags', []),
-                'dependencies': template.get('dependencies', [])
+                'tags': ', '.join(template.get('tags', [])),
+                'dependencies': ', '.join(template.get('dependencies', []))
             }
 
             documents.append(Document(page_content=content, metadata=metadata))

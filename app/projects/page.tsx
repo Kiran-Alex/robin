@@ -9,7 +9,7 @@ import { Bot, Plus, Search, Calendar, Code, ExternalLink, Trash2 } from "lucide-
 import { useRouter } from "next/navigation"
 import { getUserId } from "@/lib/user"
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000"
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001"
 
 interface Project {
   id: string

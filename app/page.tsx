@@ -11,7 +11,7 @@ import { Bot, Sparkles, Code, Zap } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { getUserId } from "@/lib/user"
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000"
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001"
 
 interface Command {
   name: string
@@ -517,18 +517,26 @@ export default function CreateBotPage() {
           </div>
 
           {/* Technologies Showcase */}
-          <div className="mt-16 p-6 rounded-2xl border-2" style={{ backgroundColor: 'rgba(0, 188, 162, 0.05)', borderColor: 'rgba(0, 188, 162, 0.2)' }}>
-            <h2 className="text-2xl font-bold mb-4 text-center">🏆 Powered by Cutting-Edge AI</h2>
-            <div className="grid gap-4 md:grid-cols-3">
-              <div className="p-4 bg-white rounded-lg border">
-                <div className="text-3xl mb-2">⚡</div>
-                <h3 className="font-semibold mb-1">Cerebras API</h3>
-                <p className="text-xs text-muted-foreground">World's fastest AI chip - 2600 tokens/s code generation</p>
+          <div className="mt-16 p-8 rounded-2xl border-2" style={{ backgroundColor: '#000000', borderColor: '' }}>
+            <h2 className="text-2xl font-bold mb-6 text-center text-white">🏆 Powered by Cutting-Edge AI</h2>
+            <div className="grid gap-6 md:grid-cols-2 max-w-2xl mx-auto">
+              <div className="p-6 rounded-xl border-2 transition-all hover:shadow-lg hover:shadow-[#00bca2]/20" style={{ backgroundColor: '#000000', borderColor: '#00bca2' }}>
+                <div className="flex items-start gap-4">
+                  <div className="text-4xl flex-shrink-0">⚡</div>
+                  <div>
+                    <h3 className="font-bold text-lg mb-2" style={{ color: '#00bca2' }}>Cerebras API</h3>
+                    <p className="text-sm leading-relaxed text-gray-300">World's fastest AI chip - 2600 tokens/s code generation</p>
+                  </div>
+                </div>
               </div>
-              <div className="p-4 bg-white rounded-lg border">
-                <div className="text-3xl mb-2">🦙</div>
-                <h3 className="font-semibold mb-1">Meta Llama</h3>
-                <p className="text-xs text-muted-foreground">Creative bot personalities and engaging descriptions</p>
+              <div className="p-6 rounded-xl border-2 transition-all hover:shadow-lg hover:shadow-[#00bca2]/20" style={{ backgroundColor: '#000000', borderColor: '#00bca2' }}>
+                <div className="flex items-start gap-4">
+                  <div className="text-4xl flex-shrink-0">🦙</div>
+                  <div>
+                    <h3 className="font-bold text-lg mb-2" style={{ color: '#00bca2' }}>Meta Llama</h3>
+                    <p className="text-sm leading-relaxed text-gray-300">Creative bot personalities and engaging descriptions</p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -547,21 +555,21 @@ export default function CreateBotPage() {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Advanced Bot Features</CardTitle>
+                <CardTitle className="text-lg">Custom Commands</CardTitle>
               </CardHeader>
               <CardContent>
                 <p className="text-muted-foreground">
-                  Bots with built-in web search, content fetching, and GitHub integration
+                  Create bots with custom commands, data persistence, and interactive features
                 </p>
               </CardContent>
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">One-Click Deploy</CardTitle>
+                <CardTitle className="text-lg">Live Testing</CardTitle>
               </CardHeader>
               <CardContent>
                 <p className="text-muted-foreground">
-                  Deploy your bot instantly to Discord servers with automatic hosting and monitoring
+                  Test your bot locally with real-time logs and instant code updates
                 </p>
               </CardContent>
             </Card>

@@ -21,18 +21,21 @@ from datetime import datetime
 load_dotenv()
 
 # Import RAG service
-from backend.rag_service import get_rag_service
+try:
+    from backend.rag_service import get_rag_service
+except ImportError:
+    from rag_service import get_rag_service
 
 # Ensure env var is present but do not crash app on missing key
 _cerebras_api_key = os.getenv("CEREBRAS_API_KEY")
 if _cerebras_api_key:
     os.environ["CEREBRAS_API_KEY"] = _cerebras_api_key
 
-def get_llm(model: str = "llama-4-scout-17b-16e-instruct", timeout: int = 30) -> ChatCerebras:
+def get_llm(model: str = "llama-4-maverick-17b-128e-instruct", timeout: int = 30) -> ChatCerebras:
     """
     Lazily initialize the LLM so the app can start even if the key is missing
-    Default model: llama-4-scout-17b-16e-instruct (newest Llama 4 model, 2600 tokens/s)
-    Alternative models: llama-3.3-70b (stable, fast), llama-4-maverick-17b-128e-instruct (largest, preview)
+    Default model: llama-4-maverick-17b-128e-instruct (Llama 4 Maverick, optimized for code generation)
+    This model is used across all endpoints for consistency and best performance
     """
     if not os.getenv("CEREBRAS_API_KEY"):
         raise HTTPException(status_code=500, detail="CEREBRAS_API_KEY not configured")
@@ -65,6 +68,12 @@ def check_docker_daemon() -> None:
             status_code=503,
             detail="Docker check timed out. Ensure Docker is running."
         )
+
+
+def strip_code_blocks(text: str) -> str:
+    """Remove markdown code fences so chat replies stay concise."""
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL).strip()
+
 
 app = FastAPI()
 
@@ -118,6 +127,9 @@ class AIAssistRequest(BaseModel):
     message: str
     file_tree: Optional[List[Dict[str, Any]]] = None
     conversation_history: Optional[List[Dict[str, str]]] = None
+
+class RailwayDeployRequest(BaseModel):
+    project_id: str
 
 # Workspace root (can be overridden via WORKSPACE_ROOT env)
 WORKSPACE_ROOT = os.getenv(
@@ -339,7 +351,7 @@ def fix_python_syntax_with_ai(code: str, error_msg: str, filepath: str) -> str:
     Use AI to fix Python syntax errors
     """
     try:
-        llm = get_llm()
+        llm = get_llm(model="llama-4-maverick-17b-128e-instruct")
         fix_prompt = ChatPromptTemplate.from_template(
             """You are a Python syntax error fixer. Fix ONLY the syntax errors in the code below.
 
@@ -443,7 +455,7 @@ async def create_plan(data: PlanRequest):
     print(f"[PLAN] Generating plan for: {data.description[:50]}...")
 
     try:
-        llm = get_llm(model="llama-4-scout-17b-16e-instruct", timeout=15)  # 15s timeout
+        llm = get_llm(model="llama-4-maverick-17b-128e-instruct", timeout=15)  # 15s timeout
         print(f"[PLAN] LLM initialized, sending request...")
 
         plan_prompt = ChatPromptTemplate.from_template(
@@ -513,7 +525,7 @@ async def generate(data: GenerateData):
     print(f"\n{'='*60}")
     print(f"[GENERATE] Starting generation for project...")
 
-    llm = get_llm(model="qwen-3-coder-480b")  # Qwen 3 Coder 480B - best for code generation
+    llm = get_llm(model="llama-4-maverick-17b-128e-instruct")  # Llama 4 Maverick - best for code generation
     print(f"[GENERATE] ⏱️  LLM initialized in {time.time() - start_time:.2f}s")
 
     project_id = data.project_id or uuid.uuid4().hex[:12]
@@ -526,11 +538,22 @@ async def generate(data: GenerateData):
     container_name = f"bot-{project_id}"
     try:
         print(f"[GENERATE] Stopping any existing container: {container_name}")
-        subprocess.run(
-            ["docker", "stop", container_name],
-            capture_output=True,
-            timeout=10
-        )
+        try:
+            # Try graceful stop with short timeout
+            subprocess.run(
+                ["docker", "stop", "-t", "5", container_name],
+                capture_output=True,
+                timeout=8
+            )
+        except subprocess.TimeoutExpired:
+            # Force kill if graceful stop fails
+            print(f"[GENERATE] Graceful stop timed out, force killing...")
+            subprocess.run(
+                ["docker", "kill", container_name],
+                capture_output=True,
+                timeout=5
+            )
+
         subprocess.run(
             ["docker", "rm", container_name],
             capture_output=True,
@@ -619,15 +642,71 @@ CRITICAL ANTI-PLACEHOLDER RULES:
 
 STEP 4: STRUCTURE THE CODE
 Organize into appropriate files (use template structure as reference):
-- Main bot file with all commands
+- Main bot file with all commands (MUST include load_dotenv() at the top)
 - requirements.txt (REQUIRED: must include discord.py>=2.3.2 and python-dotenv>=1.0.0)
 - Data files (JSON) for persistence
+
+CRITICAL .ENV FILE HANDLING:
+Every bot MUST include this exact code at the very top of main.py:
+```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Rest of imports
+import discord
+from discord.ext import commands
+# ... other imports
+```
+
+And at the bottom:
+```python
+if __name__ == "__main__":
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        print("ERROR: DISCORD_TOKEN not found in .env file")
+        print("Make sure you have a .env file with DISCORD_TOKEN=your_token_here")
+        exit(1)
+
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        print("ERROR: Invalid DISCORD_TOKEN. Please check your .env file.")
+    except Exception as e:
+        print(f"ERROR: Failed to start bot: {{e}}")
 
 REQUIREMENTS:
 - Use discord.Intents.default() + message_content = True
 - IMPORTANT: Always set help_command=None when creating the bot
 - Create a custom @bot.command() async def help(ctx) function
-- Use {discordToken} in .env
+- CRITICAL: ALWAYS add these imports at the top of main.py:
+  ```python
+  import os
+  from dotenv import load_dotenv
+  load_dotenv()
+  ```
+- CRITICAL: Bot token MUST use os.getenv('DISCORD_TOKEN') NOT hardcoded token:
+  ```python
+  if __name__ == "__main__":
+      token = os.getenv('DISCORD_TOKEN')
+      if not token:
+          print("ERROR: DISCORD_TOKEN not found in .env file")
+          exit(1)
+      bot.run(token)
+  ```
+- **CRITICAL: ALWAYS USE DISCORD EMBEDS FOR ALL RESPONSES**:
+  ```python
+  embed = discord.Embed(
+      title="Title Here",
+      description="Description here",
+      color=discord.Color.blue()
+  )
+  embed.add_field(name="Field Name", value="Field Value", inline=False)
+  await ctx.send(embed=embed)
+  ```
+- **NEVER use plain text responses like ctx.send("text")**
+- **EVERY command MUST respond with embeds ONLY**
 - Implement REAL functionality, not stubs
 - Follow template patterns for error handling and data persistence
 
@@ -665,6 +744,12 @@ Return ONLY the JSON object:"""
 
     print(f"[GENERATE] ⏱️  AI generated code in {ai_elapsed:.2f}s")
     print(f"[GENERATE] Raw AI response length: {len(raw_text)} chars")
+
+    # DEBUG: Write raw response to file
+    debug_file = f"/tmp/cerebras_response_{project_id}.txt"
+    with open(debug_file, 'w') as f:
+        f.write(raw_text)
+    print(f"[GENERATE] 🔍 DEBUG: Raw response saved to {debug_file}")
 
     # [Rest of the generate function continues with JSON parsing, file writing, etc.]
     # Due to length constraints, I'll add a comment indicating the rest follows the original pattern
@@ -718,10 +803,35 @@ Return ONLY the JSON object:"""
         return text[start_idx:].strip()
 
     cleaned_text = extract_json_block(raw_text)
-    
+
     if not cleaned_text.strip():
         raise HTTPException(status_code=502, detail="Model returned empty response")
-    
+
+    # FIX: Convert Python triple-quoted strings to JSON-escaped strings
+    # Cerebras sometimes returns invalid JSON with """ instead of proper escaping
+    def fix_triple_quotes(text: str) -> str:
+        """Replace Python triple-quote strings with JSON-safe strings"""
+        import re
+
+        # Find all """...""" blocks and convert them to proper JSON strings
+        def replace_triple_quote(match):
+            content = match.group(1)
+            # Escape special JSON characters
+            content = content.replace('\\', '\\\\')
+            content = content.replace('"', '\\"')
+            content = content.replace('\n', '\\n')
+            content = content.replace('\r', '\\r')
+            content = content.replace('\t', '\\t')
+            return f'"{content}"'
+
+        # Match """...""" (non-greedy)
+        result = re.sub(r'"""(.*?)"""', replace_triple_quote, text, flags=re.DOTALL)
+        return result
+
+    # Apply triple-quote fix FIRST
+    cleaned_text = fix_triple_quotes(cleaned_text)
+    print(f"[GENERATE] After triple-quote fix, length: {len(cleaned_text)}")
+
     def fix_escape_sequences(text: str) -> str:
         def fix_string(match):
             content = match.group(0)
@@ -729,7 +839,7 @@ Return ONLY the JSON object:"""
             return fixed
         result = re.sub(r'"(?:[^"\\]|\\.)*"', fix_string, text)
         return result
-    
+
     pre_fixed = fix_escape_sequences(cleaned_text)
     repaired_text = repair_json(pre_fixed)
     
@@ -751,13 +861,54 @@ Return ONLY the JSON object:"""
     has_requirements = any(f.get("path") == "requirements.txt" for f in files if isinstance(f, dict))
     if not has_requirements:
         files.append({"path": "requirements.txt", "content": "discord.py>=2.3.2\npython-dotenv>=1.0.0\n"})
+
+    # Add Railway configuration file
+    railway_config = {
+        "path": "railway.json",
+        "content": json.dumps({
+            "build": {
+                "builder": "NIXPACKS"
+            },
+            "deploy": {
+                "startCommand": "python main.py",
+                "restartPolicyType": "ON_FAILURE",
+                "restartPolicyMaxRetries": 10
+            }
+        }, indent=2)
+    }
+    files.append(railway_config)
+
+    # Add Nixpacks configuration for Python runtime
+    nixpacks_config = {
+        "path": "nixpacks.toml",
+        "content": """[phases.setup]
+providers = ["python"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python main.py"
+"""
+    }
+    files.append(nixpacks_config)
     
     # Write files
     for file_obj in files:
+        # Handle both dict and string objects
+        if isinstance(file_obj, str):
+            continue  # Skip string entries
+        if not isinstance(file_obj, dict):
+            continue  # Skip non-dict entries
+
         path = file_obj.get("path")
         content = file_obj.get("content", "").strip()
+        print(f"[GENERATE] Processing file: {path}, content length: {len(content)} chars")
         if not path or not isinstance(path, str):
+            print(f"[GENERATE] ⚠️  Skipping invalid path: {path}")
             continue
+        if not content:
+            print(f"[GENERATE] ⚠️  WARNING: {path} has EMPTY content!")
         
         # Replace token placeholders
         for placeholder in ["{discordToken}", "{{discordToken}}", "YOUR_TOKEN_HERE"]:
@@ -839,7 +990,10 @@ async def delete_project(project_id: str, user_id: str = Query(..., description=
     # Stop container
     container_name = f"bot-{project_id}"
     try:
-        subprocess.run(["docker", "stop", container_name], capture_output=True, timeout=10)
+        try:
+            subprocess.run(["docker", "stop", "-t", "5", container_name], capture_output=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
         subprocess.run(["docker", "rm", container_name], capture_output=True, timeout=10)
     except:
         pass
@@ -895,7 +1049,10 @@ async def start_container(data: ContainerStartRequest):
     
     # Clean up existing
     try:
-        subprocess.run(["docker", "stop", container_name], capture_output=True, timeout=10)
+        try:
+            subprocess.run(["docker", "stop", "-t", "5", container_name], capture_output=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
         subprocess.run(["docker", "rm", container_name], capture_output=True, timeout=10)
     except:
         pass
@@ -970,7 +1127,10 @@ async def stop_container(data: ContainerStopRequest):
         
         container_id = inspect_result.stdout.strip()
         
-        subprocess.run(["docker", "stop", container_name], capture_output=True, text=True, timeout=30)
+        try:
+            subprocess.run(["docker", "stop", "-t", "5", container_name], capture_output=True, text=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "kill", container_name], capture_output=True, text=True, timeout=5)
         subprocess.run(["docker", "rm", container_name], capture_output=True, text=True, timeout=10)
         
         if project_id in running_containers:
@@ -1060,8 +1220,8 @@ async def ai_assist(data: AIAssistRequest):
         if not os.path.exists(project_dir):
             raise HTTPException(status_code=404, detail="Project not found")
 
-        # Use Llama 4 Scout for fast responses
-        llm = get_llm(model="llama-4-scout-17b-16e-instruct")
+        # Use Llama 4 Maverick for comprehensive responses
+        llm = get_llm(model="llama-4-maverick-17b-128e-instruct")
 
         # Build context from conversation history
         conversation_context = ""
@@ -1071,8 +1231,10 @@ async def ai_assist(data: AIAssistRequest):
                 content = msg.get("content", "")
                 conversation_context += f"{role.upper()}: {content}\n"
 
-        # Build file tree context
-        file_tree_summary = ""
+        # Build comprehensive project context including file contents and logs
+        project_context = ""
+        
+        # Get file tree
         if data.file_tree:
             def summarize_tree(nodes, depth=0):
                 summary = ""
@@ -1085,12 +1247,40 @@ async def ai_assist(data: AIAssistRequest):
                         summary += summarize_tree(node["children"], depth + 1)
                 return summary
             file_tree_summary = summarize_tree(data.file_tree)
+            project_context += f"PROJECT STRUCTURE:\n{file_tree_summary}\n\n"
+        
+        # Get actual file contents for key files
+        key_files = ["main.py", "bot.py", "requirements.txt", "data.json"]
+        for filename in key_files:
+            try:
+                file_path = os.path.join(project_dir, filename)
+                if os.path.exists(file_path):
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        project_context += f"FILE: {filename}\n```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
+            except Exception as e:
+                project_context += f"FILE: {filename} - Error reading: {str(e)}\n\n"
+        
+        # Get recent logs if available
+        try:
+            container_name = f"bot-{project_id}"
+            logs_result = subprocess.run(
+                ["docker", "logs", "--tail", "50", container_name],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if logs_result.returncode == 0:
+                logs = logs_result.stdout + logs_result.stderr
+                if logs.strip():
+                    project_context += f"RECENT LOGS:\n```\n{logs[-1000:]}{'...' if len(logs) > 1000 else ''}\n```\n\n"
+        except:
+            pass  # Docker not available or container not running
 
         prompt = ChatPromptTemplate.from_template(
-            """You are an AI coding assistant helping with a Discord bot project.
+            """You are a friendly Discord bot coding assistant with conversational intelligence.
 
-PROJECT STRUCTURE:
-{file_tree}
+{project_context}
 
 CONVERSATION HISTORY:
 {conversation}
@@ -1098,18 +1288,83 @@ CONVERSATION HISTORY:
 USER REQUEST:
 {message}
 
-INSTRUCTIONS:
-1. If the user asks about the project, explain based on the file structure
-2. If they request code changes, provide clear instructions or code snippets
-3. If they ask to add features, suggest specific file changes
-4. Be concise and helpful
-5. If you suggest code changes, indicate which file to modify
+CRITICAL: UNDERSTAND USER INTENT FIRST
+Before responding, determine what the user ACTUALLY wants:
 
-Respond naturally and helpfully:"""
+1. **INFORMATIONAL QUESTIONS** (NO CODE NEEDED):
+   - "what command did you add?"
+   - "how does this work?"
+   - "what does this do?"
+   - "explain this feature"
+   - "what changed?"
+
+   Response: Just answer their question conversationally. NO CODE BLOCKS.
+
+2. **CODE CHANGE REQUESTS** (CODE NEEDED):
+   - "add a feature..."
+   - "fix the error..."
+   - "change this to..."
+   - "implement..."
+   - "update the code..."
+
+   Response: Provide COMPLETE file contents in code blocks that will be auto-applied.
+
+RESPONSE RULES:
+- If user asks a QUESTION → Answer conversationally, NO code blocks
+- If user asks to ADD/FIX/CHANGE → Provide complete code in blocks
+- Remember conversation history - don't repeat yourself
+- Be concise and friendly
+- Only show code when user explicitly wants changes
+
+WHEN PROVIDING CODE (only if user requests changes):
+Use these formats:
+
+**For main.py:**
+```python
+[COMPLETE FILE CONTENTS]
+```
+
+**For data.json:**
+```json
+{{
+  "complete": "json content"
+}}
+```
+
+**For .env:**
+```env
+DISCORD_TOKEN=value
+```
+
+**For requirements.txt:**
+```txt
+discord.py>=2.3.2
+python-dotenv>=1.0.0
+```
+
+CONVERSATIONAL EXAMPLES:
+
+User: "what command did you add?"
+You: "I added two commands:
+- `!addtrackedchannel #channel` - Adds a channel to track for cursed words
+- `!removetrackedchannel #channel` - Removes a channel from tracking
+
+These let you control which channels the bot monitors for inappropriate language."
+
+User: "add a ban command"
+You: "I'll add a ban command. Here's the updated main.py with the new feature:
+
+```python
+[COMPLETE CODE WITH BAN COMMAND]
+```
+
+The ban command lets moderators ban users with `!ban @user reason`."
+
+REMEMBER: Answer questions with words, implement changes with code."""
         )
 
         messages = prompt.invoke({
-            "file_tree": file_tree_summary or "No file tree available",
+            "project_context": project_context or "No project context available",
             "conversation": conversation_context or "No previous conversation",
             "message": message
         })
@@ -1117,15 +1372,186 @@ Respond naturally and helpfully:"""
         response = llm.invoke(messages)
         ai_response = response.content.strip()
 
-        # Determine if changes or restart needed (simple heuristics)
-        needs_changes = any(keyword in message.lower() for keyword in ["add", "create", "modify", "change", "fix", "update", "edit"])
-        needs_restart = any(keyword in message.lower() for keyword in ["add command", "new command", "restart", "reload"])
+        # Parse AI response for code changes and actions
+        changes_made = []
+        needs_restart = False
+        # Extract all code blocks from AI response
+        code_blocks = re.findall(r'```(\w+)?\n(.*?)\n```', ai_response, re.DOTALL)
+
+        for lang, code_content in code_blocks:
+            language_label = (lang or "text").strip().lower()
+            code_index = ai_response.find(code_content)
+            preceding_text = ai_response[:code_index] if code_index != -1 else ""
+            preceding_lower = preceding_text.lower()
+            code_lower = code_content.lower()
+
+            # Handle Python files
+            if language_label in {"python", "py"}:
+                # Determine which file this code belongs to
+                target_file = None
+
+                if "main.py" in preceding_lower or "main.py" in code_lower:
+                    target_file = "main.py"
+                elif "bot.py" in preceding_lower or "bot.py" in code_lower:
+                    target_file = "bot.py"
+                elif any(indicator in code_lower for indicator in ["bot.run", "discord.ext", "@bot.command"]):
+                    # This is likely the main bot file
+                    target_file = "main.py" if os.path.exists(os.path.join(project_dir, "main.py")) else "bot.py"
+
+                if target_file:
+                    try:
+                        file_path = os.path.join(project_dir, target_file)
+
+                        # Validate syntax before writing
+                        syntax_error = validate_python_syntax(code_content, target_file)
+                        if syntax_error:
+                            print(f"[AI-ASSIST] ⚠️ Syntax error in generated code: {syntax_error}")
+                            continue
+
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(code_content)
+
+                        changes_made.append(f"Updated {target_file}")
+                        needs_restart = True
+                        print(f"[AI-ASSIST] ✅ Applied changes to {target_file}")
+                    except Exception as e:
+                        print(f"[AI-ASSIST] ❌ Failed to write {target_file}: {e}")
+
+            # Handle JSON files (data.json)
+            elif language_label == "json":
+                try:
+                    if "data.json" in preceding_lower or "data.json" in code_lower:
+                        json_file = os.path.join(project_dir, "data.json")
+                        # Validate JSON before writing
+                        json.loads(code_content)  # This will raise if invalid
+                        with open(json_file, 'w', encoding='utf-8') as f:
+                            f.write(code_content)
+                        changes_made.append("Updated data.json")
+                        print(f"[AI-ASSIST] ✅ Applied changes to data.json")
+                except json.JSONDecodeError as e:
+                    print(f"[AI-ASSIST] ⚠️ Invalid JSON: {e}")
+                except Exception as e:
+                    print(f"[AI-ASSIST] ❌ Failed to write data.json: {e}")
+
+            # Handle .env files
+            elif language_label in {"makefile", "env", "dotenv"} or "discord_token" in code_lower:
+                try:
+                    env_file = os.path.join(project_dir, ".env")
+                    with open(env_file, 'w', encoding='utf-8') as f:
+                        f.write(code_content)
+                    changes_made.append("Updated .env file")
+                    needs_restart = True
+                    print(f"[AI-ASSIST] ✅ Applied changes to .env")
+                except Exception as e:
+                    print(f"[AI-ASSIST] ❌ Failed to write .env: {e}")
+
+            # Handle requirements.txt
+            elif language_label in {"txt", "text"}:
+                try:
+                    if "requirements.txt" in preceding_lower or "requirements.txt" in code_lower:
+                        req_file = os.path.join(project_dir, "requirements.txt")
+                        with open(req_file, 'w', encoding='utf-8') as f:
+                            f.write(code_content)
+                        changes_made.append("Updated requirements.txt")
+                        needs_restart = True
+                        print(f"[AI-ASSIST] ✅ Applied changes to requirements.txt")
+                except Exception as e:
+                    print(f"[AI-ASSIST] ❌ Failed to write requirements.txt: {e}")
+
+        # Auto-restart container if changes were made
+        if needs_restart and changes_made:
+            try:
+                container_name = f"bot-{project_id}"
+
+                # Stop existing container - use kill for faster, guaranteed stop
+                print(f"[AI-ASSIST] Stopping container {container_name}...")
+                try:
+                    # Try graceful stop first with shorter timeout
+                    subprocess.run(["docker", "stop", "-t", "5", container_name], capture_output=True, timeout=8)
+                except subprocess.TimeoutExpired:
+                    # Force kill if graceful stop fails
+                    print(f"[AI-ASSIST] Graceful stop timed out, force killing...")
+                    subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
+
+                subprocess.run(["docker", "rm", container_name], capture_output=True, timeout=10)
+
+                # Rebuild and restart
+                print(f"[AI-ASSIST] Rebuilding container...")
+
+                # Find main file
+                main_file = None
+                for filename in ["main.py", "bot.py", "src/bot.py", "src/main.py"]:
+                    if os.path.exists(os.path.join(project_dir, filename)):
+                        main_file = filename
+                        break
+
+                if main_file:
+                    # Create Dockerfile
+                    dockerfile_content = f"""FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+ENV PYTHONPATH=/app
+CMD ["python", "-u", "{main_file}"]
+"""
+                    with open(os.path.join(project_dir, "Dockerfile"), "w") as f:
+                        f.write(dockerfile_content)
+
+                    # Build image
+                    image_tag = f"discord-bot-{project_id}"
+                    build_result = subprocess.run(
+                        ["docker", "build", "-t", image_tag, "."],
+                        cwd=project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
+
+                    if build_result.returncode == 0:
+                        # Run container
+                        run_result = subprocess.run(
+                            ["docker", "run", "-d", "--name", container_name, image_tag],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+
+                        if run_result.returncode == 0:
+                            container_id = run_result.stdout.strip()
+                            running_containers[project_id] = container_id
+                            changes_made.append("Container restarted successfully")
+                            print(f"[AI-ASSIST] ✅ Container restarted: {container_id[:12]}")
+                        else:
+                            changes_made.append(f"Container restart failed: {run_result.stderr}")
+                            print(f"[AI-ASSIST] ❌ Failed to start container: {run_result.stderr}")
+                    else:
+                        changes_made.append(f"Docker build failed: {build_result.stderr}")
+                        print(f"[AI-ASSIST] ❌ Docker build failed: {build_result.stderr}")
+                else:
+                    changes_made.append("Could not find main bot file for restart")
+            except Exception as e:
+                changes_made.append(f"Restart failed: {str(e)}")
+                print(f"[AI-ASSIST] ❌ Restart error: {e}")
+
+        # Update project modified timestamp
+        if changes_made:
+            update_project_modified(project_id)
+
+        if changes_made:
+            formatted_changes = "\n".join(f"- {change}" for change in changes_made)
+            display_response = f"I updated the project:\n{formatted_changes}"
+        else:
+            stripped = strip_code_blocks(ai_response)
+            display_response = stripped if stripped else "I didn't apply any file edits. Let me know what you'd like me to change."
 
         return {
-            "response": ai_response,
-            "needs_changes": needs_changes,
-            "needs_restart": needs_restart,
-            "summary": None
+            "response": display_response,
+            "raw_response": ai_response,
+            "changes_applied": len(changes_made) > 0,
+            "auto_restarted": needs_restart and any("restarted successfully" in c for c in changes_made),
+            "summary": f"Applied {len(changes_made)} changes" if changes_made else None,
+            "changes": changes_made
         }
 
     except Exception as e:
@@ -1206,3 +1632,83 @@ async def fix_syntax_errors(data: ContainerStartRequest):
     except Exception as e:
         print(f"[FIX-SYNTAX] Error: {e}")
         return {"status": "error", "message": str(e)}
+
+@app.post("/export-project-zip")
+async def export_project_zip(data: RailwayDeployRequest):
+    """Export project as a ZIP file for Railway deployment"""
+    import zipfile
+    import io
+
+    try:
+        project_id = data.project_id
+        project_dir = get_project_dir(project_id)
+
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        print(f"[EXPORT] Creating ZIP for project {project_id}...")
+
+        # Create ZIP file in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for root, dirs, files in os.walk(project_dir):
+                for file in files:
+                    if file == "Dockerfile":
+                        continue  # Skip Docker-specific files
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, project_dir)
+                    zip_file.write(file_path, arcname)
+
+        zip_buffer.seek(0)
+
+        # Return ZIP file
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename=discord-bot-{project_id}.zip"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[EXPORT] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@app.get("/railway-deploy-url/{project_id}")
+async def get_railway_deploy_url(project_id: str):
+    """Generate deployment instructions for the project"""
+    try:
+        project_dir = get_project_dir(project_id)
+
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        metadata = get_project_metadata(project_id)
+        project_name = metadata.get("name", f"bot-{project_id}") if metadata else f"bot-{project_id}"
+
+        # Read DISCORD_TOKEN from .env for instructions
+        env_file_path = os.path.join(project_dir, ".env")
+        discord_token = ""
+        if os.path.exists(env_file_path):
+            with open(env_file_path, 'r') as f:
+                for line in f:
+                    if line.startswith("DISCORD_TOKEN="):
+                        discord_token = line.split("=", 1)[1].strip()
+                        break
+
+        return {
+            "project_name": project_name,
+            "discord_token": discord_token,
+            "instructions": [
+                "1. Download your bot files as a ZIP",
+                "2. Deploy to your preferred hosting service",
+                "3. Add DISCORD_TOKEN as an environment variable",
+                "4. Your bot will run 24/7!"
+            ]
+        }
+
+    except Exception as e:
+        print(f"[DEPLOY] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate deployment info: {str(e)}")

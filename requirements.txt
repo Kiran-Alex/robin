@@ -6,6 +6,8 @@ python-dotenv
 langchain
 langchain-cerebras
 langchain-community
+langchain-huggingface
+langchain-chroma
 langchain-ollama
 aiohttp
 json-repair
