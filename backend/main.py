@@ -525,7 +525,7 @@ async def generate(data: GenerateData):
     print(f"\n{'='*60}")
     print(f"[GENERATE] Starting generation for project...")
 
-    llm = get_llm(model="qwen-3-coder-480b")  # Qwen 3 Coder 480B - specialized for code generation
+    llm = get_llm(model="llama-4-maverick-17b-128e-instruct", temperature=0.6, min_p=0.01, top_p=0.9)  # Llama 4 Maverick 17B - optimized for instruction following
     print(f"[GENERATE] ⏱️  LLM initialized in {time.time() - start_time:.2f}s")
 
     project_id = data.project_id or uuid.uuid4().hex[:12]
